@@ -1,0 +1,191 @@
+/*
+ * q1.c -- Sort (number, color) pairs by color in O(n)
+ *
+ * Input: n pairs, each (number, color) where color in {RED,BLUE,YELLOW},
+ * already sorted by number. Output: all pairs reordered so every RED
+ * comes before every BLUE comes before every YELLOW, with the numbers
+ * WITHIN each color group still in sorted order.
+ *
+ * Algorithm: stable counting sort keyed on color (only 3 possible key
+ * values, so counting sort is O(n+3) = O(n)). See README.md for the
+ * full derivation and the stability argument.
+ *
+ * This program:
+ *   1. Verifies correctness: output is a permutation of the input,
+ *      colors appear in non-decreasing (RED,BLUE,YELLOW) order, and
+ *      numbers are non-decreasing WITHIN each color group.
+ *   2. Benchmarks array-touch operations (should be exactly linear
+ *      in n) against a generic O(n log n) comparison sort (qsort) by
+ *      color, for growing n, and against wall-clock time.
+ *   3. Writes a self-contained GNUPLOT script "plot.gnu" (data
+ *      embedded inline -- no .csv/.dat/.py file).
+ *
+ * Compile:  gcc -O2 -o q1 q1.c
+ * Run:      ./q1
+ * Plot:     gnuplot plot.gnu   (produces ops.png and time.png)
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+typedef enum { RED = 0, BLUE = 1, YELLOW = 2 } Color;
+typedef struct { int number; Color color; } Item;
+
+static long long g_ops; /* array reads/writes performed by sort_by_color */
+
+/* ======================================================================
+ *  O(n) STABLE COUNTING SORT BY COLOR
+ * ====================================================================== */
+static void sort_by_color(const Item *A, int n, Item *B) {
+    int count[3] = {0, 0, 0};
+
+    for (int i = 0; i < n; i++) { g_ops++; count[A[i].color]++; }
+
+    int pos[3];
+    pos[RED] = 0;
+    pos[BLUE] = pos[RED] + count[RED];
+    pos[YELLOW] = pos[BLUE] + count[BLUE];
+
+    for (int i = 0; i < n; i++) {
+        g_ops++;
+        B[pos[A[i].color]++] = A[i];
+    }
+}
+
+/* ======================================================================
+ *  GENERIC O(n log n) BASELINE  (qsort by color -- NOT guaranteed
+ *  stable, used only as a timing comparison, not a correctness ref)
+ * ====================================================================== */
+static int cmp_by_color(const void *x, const void *y) {
+    const Item *a = x, *b = y;
+    return (int)a->color - (int)b->color;
+}
+
+/* ======================================================================
+ *  HELPERS
+ * ====================================================================== */
+static Item *make_input(int n, unsigned seed) {
+    Item *a = malloc((size_t)n * sizeof(Item));
+    srand(seed);
+    for (int i = 0; i < n; i++) {
+        a[i].number = i;                 /* already sorted by number */
+        a[i].color = (Color)(rand() % 3);
+    }
+    return a;
+}
+
+static double sec(clock_t a, clock_t b) { return (double)(b - a) / CLOCKS_PER_SEC; }
+
+static void run_correctness_tests(void) {
+    int fails = 0, total = 0;
+    for (int n = 0; n <= 500; n++) {
+        for (int trial = 0; trial < 3; trial++) {
+            Item *A = make_input(n, (unsigned)(n * 97 + trial));
+            Item *B = malloc((size_t)n * sizeof(Item));
+            g_ops = 0;
+            sort_by_color(A, n, B);
+            total++;
+
+            int ok = 1;
+
+            /* (1) colors non-decreasing, i.e. all RED, then BLUE, then YELLOW */
+            for (int i = 1; i < n && ok; i++)
+                if (B[i - 1].color > B[i].color) ok = 0;
+
+            /* (2) numbers non-decreasing WITHIN each color group */
+            for (int i = 1; i < n && ok; i++)
+                if (B[i - 1].color == B[i].color && B[i - 1].number > B[i].number) ok = 0;
+
+            /* (3) B is a permutation of A: same count of each (number,color) pair.
+             *     Since numbers are all distinct (0..n-1), checking that every
+             *     number 0..n-1 appears exactly once in B, with the SAME color
+             *     it had in A, is sufficient. */
+            if (ok) {
+                int *seen = calloc((size_t)(n > 0 ? n : 1), sizeof(int));
+                for (int i = 0; i < n; i++) {
+                    int num = B[i].number;
+                    if (num < 0 || num >= n || seen[num]) { ok = 0; break; }
+                    seen[num] = 1;
+                    if (B[i].color != A[num].color) { ok = 0; break; }
+                }
+                free(seen);
+            }
+
+            if (!ok) { fails++; printf("FAIL: n=%d trial=%d\n", n, trial); }
+            free(A); free(B);
+        }
+    }
+    printf("Correctness: %d/%d trials passed (n = 0..500): permutation check, "
+           "color-grouping check, and within-color number-order check\n",
+           total - fails, total);
+}
+
+int main(void) {
+    run_correctness_tests();
+
+    FILE *gp = fopen("plot.gnu", "w");
+    if (!gp) { perror("fopen plot.gnu"); return 1; }
+    fprintf(gp, "# Auto-generated by q1.c\n");
+    fprintf(gp, "# Run with:  gnuplot plot.gnu\n");
+    fprintf(gp, "set terminal pngcairo size 900,650 enhanced font 'Arial,11'\n");
+    fprintf(gp, "set grid\n\n");
+
+    int sizes[] = {1000, 5000, 10000, 50000, 100000, 500000,
+                   1000000, 2000000, 5000000};
+    int nsizes = sizeof(sizes) / sizeof(sizes[0]);
+
+    fprintf(gp, "$DATA << EOD\n");
+    fprintf(gp, "# n ops_countsort time_countsort time_qsort n_reference\n");
+
+    printf("\n%-10s %-16s %-18s %-18s\n", "n", "ops (countsort)", "time countsort(s)", "time qsort(s)");
+
+    for (int s = 0; s < nsizes; s++) {
+        int n = sizes[s];
+        Item *A = make_input(n, (unsigned)(9000000u + n));
+        Item *B = malloc((size_t)n * sizeof(Item));
+        Item *C = malloc((size_t)n * sizeof(Item));
+        memcpy(C, A, (size_t)n * sizeof(Item));
+
+        g_ops = 0;
+        clock_t t0 = clock();
+        sort_by_color(A, n, B);
+        clock_t t1 = clock();
+        double timeCS = sec(t0, t1);
+        long long ops = g_ops;
+
+        t0 = clock();
+        qsort(C, n, sizeof(Item), cmp_by_color);
+        t1 = clock();
+        double timeQS = sec(t0, t1);
+
+        printf("%-10d %-16lld %-18.6f %-18.6f\n", n, ops, timeCS, timeQS);
+        fprintf(gp, "%d %lld %.9f %.9f %d\n", n, ops, timeCS, timeQS, n);
+
+        free(A); free(B); free(C);
+    }
+    fprintf(gp, "EOD\n\n");
+
+    /* --- Plot 1: operation count vs n (should be exactly linear, 2n) --- */
+    fprintf(gp,
+        "set output 'ops.png'\n"
+        "set title 'O(n) counting sort by color: array operations vs n'\n"
+        "set xlabel 'n'\n"
+        "set ylabel 'array reads/writes'\n"
+        "plot $DATA using 1:2 with linespoints pt 7 lw 2 title 'measured operations', \\\n"
+        "     $DATA using ($1):(2*$1) with lines dt 2 lw 1.5 lc rgb 'red' title '2n (theory)'\n\n");
+
+    /* --- Plot 2: time vs n, counting sort vs qsort --- */
+    fprintf(gp,
+        "set output 'time.png'\n"
+        "set title 'O(n) counting sort vs O(n log n) qsort: time vs n'\n"
+        "set xlabel 'n'\n"
+        "set ylabel 'time (seconds)'\n"
+        "set logscale xy\n"
+        "plot $DATA using 1:3 with linespoints pt 7 lw 2 title 'counting sort O(n)', \\\n"
+        "     $DATA using 1:4 with linespoints pt 5 lw 2 title 'qsort O(n log n)'\n");
+
+    fclose(gp);
+    return 0;
+}
